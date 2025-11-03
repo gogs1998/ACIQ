@@ -104,6 +104,14 @@ class ReviewQueueResponse(FrozenModel):
     """Collection response for review queue listing."""
 
     items: list[ReviewItem]
+    rules_created: int | None = None
+
+
+class AutoRulesResponse(FrozenModel):
+    """Summary of auto-generated rules."""
+
+    created: int
+    skipped: int
 
 
 class ReviewImportRequest(FrozenModel):
@@ -113,6 +121,7 @@ class ReviewImportRequest(FrozenModel):
     bank_csv: str
     history_csv: str
     reset: bool = True
+    auto_rules: bool = False
 
 
 class ApprovalRequest(FrozenModel):
@@ -195,6 +204,7 @@ __all__ = [
     "ReviewImportRequest",
     "ReviewItem",
     "ReviewQueueResponse",
+    "AutoRulesResponse",
     "ReviewStatus",
     "RuleCreateRequest",
     "RuleDefinition",

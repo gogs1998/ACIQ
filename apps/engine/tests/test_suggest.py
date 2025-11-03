@@ -181,7 +181,9 @@ def test_review_workflow_happy_path() -> None:
 
     response = client.post("/review/import", json=import_payload)
     assert response.status_code == 200
-    queue = response.json()["items"]
+    payload = response.json()
+    assert payload.get("rules_created") is None
+    queue = payload["items"]
     assert len(queue) == 2
 
     first_txn = queue[0]["txn"]["id"]
@@ -210,6 +212,11 @@ def test_review_workflow_happy_path() -> None:
     assert rule_response.status_code == 200
     assert len(rule_response.json()) == 1
 
+    auto_rules_response = client.post(f"/review/{client_slug}/auto-rules")
+    assert auto_rules_response.status_code == 200
+    auto_payload = auto_rules_response.json()
+    assert auto_payload["created"] >= 0
+
     response = client.post(
         "/review/import",
         json={
@@ -217,9 +224,12 @@ def test_review_workflow_happy_path() -> None:
             "bank_csv": _sample_bank_csv(),
             "history_csv": _sample_history_csv(),
             "reset": True,
+            "auto_rules": True,
         },
     )
     assert response.status_code == 200
+    payload = response.json()
+    assert payload.get("rules_created") is not None
 
     queue_response = client.get(f"/review/{client_slug}/queue")
     items = queue_response.json()["items"]

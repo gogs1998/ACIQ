@@ -69,17 +69,17 @@ pnpm tauri build
 
 See the [Tauri prerequisites guide](https://tauri.app/v1/guides/getting-started/prerequisites) for platform-specific tooling.
 
-## Stage 2 workflow ó review queue and export
+## Stage 2 workflow ÔøΩ review queue and export
 
 1. Drop bank CSVs and audit trail exports under `data/clients/<slug>/inputs/{bank,sage_history}`.
-2. Launch the engine and UI (commands above). In the UI, set the client slug, load CSVs, and run suggestions. The review queue displays confidence, allows manual overrides, and captures rules straight into `workspace/rules/rules.yaml`.
+2. Launch the engine and UI (commands above). In the UI, set the client slug, load CSVs, and run suggestions. Toggle ‚ÄúAuto-create rules during import‚Äù if you want high-confidence matches to be saved as regex rules automatically, or use the ‚ÄúAuto-create rules‚Äù button to backfill them later. The review queue displays confidence, allows manual overrides, and captures rules straight into `workspace/rules/rules.yaml`.
 3. Approved/overridden rows can be exported with the "Export approved items" button. Files are written to `data/clients/<slug>/outputs/sage_import_*.csv` using the active export profile.
 4. Use the engine API directly if needed:
-   - `POST /review/import` ñ seed the queue from CSV payloads.
-   - `POST /review/{slug}/items/{txn_id}/approve` ñ accept a suggestion.
-   - `POST /review/{slug}/items/{txn_id}/override` ñ apply manual coding.
-   - `POST /review/{slug}/rules` ñ append vendor rules.
-   - `POST /review/{slug}/export` ñ generate an audit trail CSV via the current profile.
+   - `POST /review/import` ÔøΩ seed the queue from CSV payloads.
+   - `POST /review/{slug}/items/{txn_id}/approve` ÔøΩ accept a suggestion.
+   - `POST /review/{slug}/items/{txn_id}/override` ÔøΩ apply manual coding.
+   - `POST /review/{slug}/rules` ÔøΩ append vendor rules.
+   - `POST /review/{slug}/export` ÔøΩ generate an audit trail CSV via the current profile.
 
 ## Sample data
 

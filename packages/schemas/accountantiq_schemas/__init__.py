@@ -2,6 +2,7 @@
 
 from .transactions import (
     ApprovalRequest,
+    AutoRulesResponse,
     BankTxn,
     CsvSuggestionRequest,
     CsvSuggestionResponse,
@@ -39,6 +40,7 @@ __all__ = [
     "ReviewImportRequest",
     "ReviewItem",
     "ReviewQueueResponse",
+    "AutoRulesResponse",
     "ReviewStatus",
     "RuleCreateRequest",
     "RuleDefinition",

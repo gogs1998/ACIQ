@@ -37,6 +37,12 @@ interface ReviewItem {
 
 interface ReviewImportResponse {
   items: ReviewItem[];
+  rules_created?: number | null;
+}
+
+interface AutoRulesResponse {
+  created: number;
+  skipped: number;
 }
 
 interface ExportResponse {
@@ -79,6 +85,8 @@ export default function App() {
   const [historyFileName, setHistoryFileName] = useState<string>("");
   const [queueItems, setQueueItems] = useState<ReviewItem[]>([]);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  const [autoRules, setAutoRules] = useState<boolean>(true);
+  const [autoRulesRunning, setAutoRulesRunning] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [exportMessage, setExportMessage] = useState<string | null>(null);
   const [ruleMessage, setRuleMessage] = useState<string | null>(null);
@@ -302,6 +310,29 @@ export default function App() {
     [clientSlug, runSuggestions]
   );
 
+  const handleAutoRules = useCallback(async () => {
+    setAutoRulesRunning(true);
+    setError(null);
+    try {
+      const response = await fetch(`${REVIEW_BASE(clientSlug)}/auto-rules`, {
+        method: "POST"
+      });
+      if (!response.ok) {
+        throw new Error(`Auto-rule generation failed (${response.status})`);
+      }
+      const payload = (await response.json()) as AutoRulesResponse;
+      setRuleMessage(
+        `Auto rules created: ${payload.created}, skipped: ${payload.skipped}`
+      );
+      await fetchQueue();
+    } catch (error_) {
+      const message = error_ instanceof Error ? error_.message : String(error_);
+      setError(message);
+    } finally {
+      setAutoRulesRunning(false);
+    }
+  }, [clientSlug, fetchQueue]);
+
   const handleExport = useCallback(async () => {
     try {
       const response = await fetch(`${REVIEW_BASE(clientSlug)}/export`, {
@@ -388,6 +419,14 @@ export default function App() {
       </section>
 
       <section className="run">
+        <label className="checkbox">
+          <input
+            type="checkbox"
+            checked={autoRules}
+            onChange={(event) => setAutoRules(event.target.checked)}
+          />
+          Auto-create rules during import
+        </label>
         <button
           onClick={() => void runSuggestions()}
           disabled={isSubmitting || !bankCsv || !historyCsv}
@@ -396,6 +435,12 @@ export default function App() {
         </button>
         <button onClick={() => void fetchQueue()} disabled={isSubmitting}>
           Refresh queue
+        </button>
+        <button
+          onClick={() => void handleAutoRules()}
+          disabled={autoRulesRunning || queueItems.length === 0}
+        >
+          {autoRulesRunning ? "Auto-creating..." : "Auto-create rules"}
         </button>
         <button onClick={() => void handleExport()} disabled={suggestionRows.length === 0}>
           Export approved items
@@ -416,8 +461,8 @@ export default function App() {
           <div className="results-header">
             <h2>Review queue</h2>
             <span className="queue-summary">
-              Pending: {suggestionRows.filter((item) => item.status === "pending").length} ·
-              Approved: {suggestionRows.filter((item) => item.status === "approved").length} ·
+              Pending: {suggestionRows.filter((item) => item.status === "pending").length} ï¿½
+              Approved: {suggestionRows.filter((item) => item.status === "approved").length} ï¿½
               Overridden: {suggestionRows.filter((item) => item.status === "overridden").length}
             </span>
           </div>
@@ -447,8 +492,8 @@ export default function App() {
                   <td className="mono">{formatCurrency(item.txn.amount)}</td>
                   <td>
                     <div className="code-block">
-                      <span>{item.suggestion.nominal_suggested ?? "—"}</span>
-                      <small>{item.suggestion.tax_code_suggested ?? "—"}</small>
+                      <span>{item.suggestion.nominal_suggested ?? "ï¿½"}</span>
+                      <small>{item.suggestion.tax_code_suggested ?? "ï¿½"}</small>
                       <ul>
                         {item.suggestion.explanations.map((reason, index) => (
                           <li key={index}>{reason}</li>
@@ -458,8 +503,8 @@ export default function App() {
                   </td>
                   <td>
                     <div className="code-block">
-                      <span>{item.nominal_final ?? "—"}</span>
-                      <small>{item.tax_code_final ?? "—"}</small>
+                      <span>{item.nominal_final ?? "ï¿½"}</span>
+                      <small>{item.tax_code_final ?? "ï¿½"}</small>
                       {item.notes.length > 0 && (
                         <ul>
                           {item.notes.map((note, index) => (
@@ -496,3 +541,4 @@ export default function App() {
     </main>
   );
 }
+

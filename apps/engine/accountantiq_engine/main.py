@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from io import StringIO
+from typing import Iterable, Tuple
 
 from accountantiq_core import (
     BankCsvParser,
     ReviewStore,
     SageHistoryParser,
+    add_rule,
     append_rule,
     approved_items,
+    create_rule_from_transaction,
     export_review,
     list_profiles,
     load_profile,
@@ -20,6 +23,7 @@ from accountantiq_core import (
 )
 from accountantiq_schemas import (
     ApprovalRequest,
+    AutoRulesResponse,
     BankTxn,
     CsvSuggestionRequest,
     CsvSuggestionResponse,
@@ -39,6 +43,8 @@ from accountantiq_schemas import (
 )
 from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+
+AUTO_RULE_CONFIDENCE_THRESHOLD = 0.85
 
 router = APIRouter(tags=["engine"])
 
@@ -74,6 +80,43 @@ def _apply_rules(
     return updated
 
 
+def _create_rule_from_suggestion(
+    client_slug: str, txn: BankTxn, suggestion: Suggestion
+) -> bool:
+    if (
+        suggestion.nominal_suggested is None
+        or suggestion.confidence < AUTO_RULE_CONFIDENCE_THRESHOLD
+    ):
+        return False
+    rule = create_rule_from_transaction(
+        txn,
+        suggestion.nominal_suggested,
+        suggestion.tax_code_suggested,
+    )
+    if rule is None:
+        return False
+    return add_rule(client_slug, rule)
+
+
+def _auto_generate_rules(
+    client_slug: str,
+    txns: Iterable[BankTxn],
+    suggestions: Iterable[Suggestion],
+) -> Tuple[int, int]:
+    created = 0
+    considered = 0
+    for txn, suggestion in zip(txns, suggestions, strict=True):
+        if suggestion.nominal_suggested is None:
+            continue
+        if suggestion.confidence < AUTO_RULE_CONFIDENCE_THRESHOLD:
+            continue
+        considered += 1
+        if _create_rule_from_suggestion(client_slug, txn, suggestion):
+            created += 1
+    skipped = considered - created
+    return created, skipped
+
+
 @router.post("/suggest", response_model=SuggestionResponse)
 def suggest_codes(payload: SuggestionRequest) -> SuggestionResponse:
     """Return nominal/tax suggestions for the provided transactions."""
@@ -100,9 +143,18 @@ def import_review_queue(payload: ReviewImportRequest) -> ReviewQueueResponse:
     history_rows = history_parser.parse(StringIO(payload.history_csv))
     suggestions = suggest_for_transactions(bank_rows, history_rows)
     suggestions = _apply_rules(payload.client_slug, bank_rows, suggestions)
+
+    rules_created = 0
+    if payload.auto_rules:
+        created, _ = _auto_generate_rules(payload.client_slug, bank_rows, suggestions)
+        rules_created = created
+
     store = ReviewStore(payload.client_slug)
     items = store.import_batch(bank_rows, suggestions, reset=payload.reset)
-    return ReviewQueueResponse(items=items)
+    return ReviewQueueResponse(
+        items=items,
+        rules_created=rules_created if payload.auto_rules else None,
+    )
 
 
 @router.get("/review/{client_slug}/queue", response_model=ReviewQueueResponse)
@@ -146,6 +198,18 @@ def list_rules(client_slug: str) -> list[RuleDefinition]:
 def create_rule(client_slug: str, payload: RuleCreateRequest) -> list[RuleDefinition]:
     rule = RuleDefinition(**payload.model_dump())
     return append_rule(client_slug, rule)
+
+
+@router.post("/review/{client_slug}/auto-rules", response_model=AutoRulesResponse)
+def auto_rules(client_slug: str) -> AutoRulesResponse:
+    store = ReviewStore(client_slug)
+    items = store.list_items()
+    if not items:
+        return AutoRulesResponse(created=0, skipped=0)
+    txns = [item.txn for item in items]
+    suggestions = [item.suggestion for item in items]
+    created, skipped = _auto_generate_rules(client_slug, txns, suggestions)
+    return AutoRulesResponse(created=created, skipped=skipped)
 
 
 @router.get("/review/{client_slug}/profiles", response_model=list[ProfileDefinition])
