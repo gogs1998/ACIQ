@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  python:
+    name: Python checks
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      - name: Cache Poetry virtualenvs
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pypoetry
+          key: ${{ runner.os }}-poetry-${{ hashFiles('pyproject.toml', 'poetry.lock') }}
+
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-ansi
+
+      - name: Ruff
+        run: poetry run ruff check apps packages
+
+      - name: Black
+        run: poetry run black --check apps packages
+
+      - name: Mypy
+        run: poetry run mypy apps/engine packages
+
+      - name: Pytest
+        run: poetry run pytest -q
+
+  ui:
+    name: UI build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "pnpm"
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        working-directory: apps/ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        working-directory: apps/ui
+        run: pnpm lint
+
+      - name: Test
+        working-directory: apps/ui
+        run: pnpm test -- --run
+
+      - name: Build
+        working-directory: apps/ui
+        run: pnpm build
