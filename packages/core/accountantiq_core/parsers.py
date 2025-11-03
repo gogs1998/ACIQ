@@ -20,6 +20,7 @@ _DATE_FORMATS: Sequence[str] = (
     "%d/%m/%Y",
     "%d-%m-%Y",
     "%d/%m/%y",
+    "%Y%m%d",
 )
 
 _NON_ALPHA_RE = re.compile(r"[^a-z\s]")
