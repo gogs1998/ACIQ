@@ -16,6 +16,7 @@ _MIN_FUZZY_SCORE = 60
 _ALIAS_SCORE_WEIGHT = 0.6
 _DIRECTION_BONUS = 0.2
 _AMOUNT_BONUS = 0.1
+_AMOUNT_MATCH_CONFIDENCE = 0.65
 
 
 @dataclass(slots=True)
@@ -57,6 +58,28 @@ class VendorProfile:
         return median(self.amounts)
 
 
+@dataclass(slots=True)
+class AmountProfile:
+    """Aggregated codes for a specific amount profile."""
+
+    nominal_counts: Counter[str] = field(default_factory=Counter)
+    tax_counts: Counter[str] = field(default_factory=Counter)
+
+    def register_entry(self, entry: SageHistoryEntry) -> None:
+        self.nominal_counts[entry.nominal_code] += 1
+        self.tax_counts[entry.tax_code] += 1
+
+    def dominant_nominal(self) -> str | None:
+        if not self.nominal_counts:
+            return None
+        return self.nominal_counts.most_common(1)[0][0]
+
+    def dominant_tax_code(self) -> str | None:
+        if not self.tax_counts:
+            return None
+        return self.tax_counts.most_common(1)[0][0]
+
+
 def _generate_aliases(seed: str) -> set[str]:
     tokens = [token for token in seed.split() if token]
     variants = {seed}
@@ -71,7 +94,7 @@ class VendorMatcher:
     """Provide suggestions for bank transactions using vendor history."""
 
     def __init__(self, history: Sequence[SageHistoryEntry]) -> None:
-        self._profiles = self._build_profiles(history)
+        self._profiles, self._amount_profiles = self._build_profiles(history)
         self._alias_lookup: dict[str, VendorProfile] = {}
         for profile in self._profiles.values():
             for alias in profile.aliases:
@@ -79,13 +102,14 @@ class VendorMatcher:
         self._aliases: tuple[str, ...] = tuple(self._alias_lookup.keys())
 
     def suggest(self, txn: BankTxn) -> Suggestion:
-        if not self._aliases:
+        if not self._profiles:
             return Suggestion(
                 txn_id=txn.id,
                 confidence=0.0,
                 explanations=["No vendor history available"],
             )
 
+        amount_key = (txn.direction, round(abs(txn.amount), 2))
         cleaned_description = txn.description_clean or clean_description(
             txn.description_raw
         )
@@ -94,7 +118,7 @@ class VendorMatcher:
         )
         match_score = 100 if match_alias else 0
 
-        if not match_alias:
+        if not match_alias and self._aliases:
             result = process.extractOne(
                 cleaned_description,
                 self._aliases,
@@ -105,6 +129,9 @@ class VendorMatcher:
                 match_score = int(result[1] or 0)
 
         if match_alias is None or match_score < _MIN_FUZZY_SCORE:
+            amount_suggestion = self._suggest_from_amount(txn, amount_key)
+            if amount_suggestion is not None:
+                return amount_suggestion
             return Suggestion(
                 txn_id=txn.id,
                 confidence=0.0,
@@ -121,9 +148,6 @@ class VendorMatcher:
             explanations.append(
                 f"Fuzzy vendor match '{profile.vendor_key}' with score {match_score}"
             )
-
-        if profile.dominant_nominal() is None or profile.dominant_tax_code() is None:
-            explanations.append("Vendor profile lacks sufficient coding history")
 
         dominant_direction = profile.dominant_direction()
         if dominant_direction is not None:
@@ -155,12 +179,29 @@ class VendorMatcher:
                     f"{amount_median:.2f} by {delta:.2f} (tol {tolerance:.2f})"
                 )
 
+        nominal = profile.dominant_nominal()
+        tax_code = profile.dominant_tax_code()
+
+        amount_profile = self._amount_profiles.get(amount_key)
+        if nominal is None and amount_profile is not None:
+            fallback_nominal = amount_profile.dominant_nominal()
+            if fallback_nominal is not None:
+                nominal = fallback_nominal
+                fallback_tax = amount_profile.dominant_tax_code()
+                if fallback_tax is not None:
+                    tax_code = fallback_tax
+                explanations.append(
+                    "Amount match supports nominal "
+                    f"{fallback_nominal} (abs={abs(txn.amount):.2f})"
+                )
+                confidence = max(confidence, _AMOUNT_MATCH_CONFIDENCE)
+
         confidence = min(confidence, 0.99)
 
         return Suggestion(
             txn_id=txn.id,
-            nominal_suggested=profile.dominant_nominal(),
-            tax_code_suggested=profile.dominant_tax_code(),
+            nominal_suggested=nominal,
+            tax_code_suggested=tax_code,
             confidence=round(confidence, 2),
             explanations=explanations,
         )
@@ -168,11 +209,34 @@ class VendorMatcher:
     def suggest_many(self, transactions: Sequence[BankTxn]) -> list[Suggestion]:
         return [self.suggest(txn) for txn in transactions]
 
+    def _suggest_from_amount(
+        self, txn: BankTxn, amount_key: tuple[Direction, float]
+    ) -> Suggestion | None:
+        profile = self._amount_profiles.get(amount_key)
+        if profile is None:
+            return None
+        nominal = profile.dominant_nominal()
+        tax_code = profile.dominant_tax_code()
+        if nominal is None and tax_code is None:
+            return None
+        explanation = (
+            f"Amount match with historical {txn.direction} postings "
+            f"at {abs(txn.amount):.2f}"
+        )
+        return Suggestion(
+            txn_id=txn.id,
+            nominal_suggested=nominal,
+            tax_code_suggested=tax_code,
+            confidence=_AMOUNT_MATCH_CONFIDENCE,
+            explanations=[explanation],
+        )
+
     @staticmethod
     def _build_profiles(
         history: Sequence[SageHistoryEntry],
-    ) -> dict[str, VendorProfile]:
+    ) -> tuple[dict[str, VendorProfile], dict[tuple[Direction, float], AmountProfile]]:
         profiles: dict[str, VendorProfile] = {}
+        amount_profiles: dict[tuple[Direction, float], AmountProfile] = {}
         for entry in history:
             base = entry.vendor_hint or entry.description_clean
             cleaned = clean_description(base)
@@ -187,7 +251,15 @@ class VendorMatcher:
             if entry.vendor_hint:
                 profile.aliases.update(_generate_aliases(entry.vendor_hint))
             profile.register_entry(entry)
-        return profiles
+
+            direction: Direction = "debit" if entry.amount < 0 else "credit"
+            key = (direction, round(abs(entry.amount), 2))
+            amount_profile = amount_profiles.get(key)
+            if amount_profile is None:
+                amount_profile = AmountProfile()
+                amount_profiles[key] = amount_profile
+            amount_profile.register_entry(entry)
+        return profiles, amount_profiles
 
 
 def suggest_for_transactions(

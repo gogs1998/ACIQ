@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 from accountantiq_core import (
@@ -10,7 +11,7 @@ from accountantiq_core import (
     VendorMatcher,
     suggest_for_transactions,
 )
-from accountantiq_schemas import BankTxn, SageHistoryEntry
+from accountantiq_schemas import BankTxn, Direction, SageHistoryEntry
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 EXAMPLES_DIR = REPO_ROOT / "examples"
@@ -45,13 +46,46 @@ def test_vendor_matcher_returns_high_confidence_for_known_vendor() -> None:
 
 def test_vendor_matcher_handles_unknown_vendor_gracefully() -> None:
     match = VendorMatcher(load_history())
-    amazon_txn = next(txn for txn in load_bank() if "amazon" in txn.description_clean)
+    sample = load_bank()[0]
+    unknown_txn = BankTxn(
+        id="unknown-txn",
+        date=date(2025, 1, 1),
+        amount=1234.56,
+        direction="credit",
+        description_raw="Completely new vendor",
+        description_clean="completely new vendor",
+        account_id=sample.account_id,
+    )
 
-    suggestion = match.suggest(amazon_txn)
+    suggestion = match.suggest(unknown_txn)
 
     assert suggestion.nominal_suggested is None
     assert suggestion.confidence == 0.0
+    assert suggestion.explanations
     assert "no high-confidence" in suggestion.explanations[0].lower()
+
+
+def test_vendor_matcher_uses_amount_fallback_for_new_description() -> None:
+    history = load_history()
+    match = VendorMatcher(history)
+    reference = history[0]
+    direction: Direction = "debit" if reference.amount < 0 else "credit"
+    txn = BankTxn(
+        id="amount-fallback",
+        date=reference.date,
+        amount=reference.amount,
+        direction=direction,
+        description_raw="Unseen vendor with familiar amount",
+        description_clean="unseen vendor with familiar amount",
+        account_id="TEST",
+    )
+
+    suggestion = match.suggest(txn)
+
+    assert suggestion.nominal_suggested == reference.nominal_code
+    assert suggestion.tax_code_suggested == reference.tax_code
+    assert suggestion.confidence >= 0.6
+    assert any("amount match" in note.lower() for note in suggestion.explanations)
 
 
 def test_suggest_for_transactions_matches_batch_output() -> None:
