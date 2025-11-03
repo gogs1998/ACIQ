@@ -43,7 +43,7 @@ pnpm install
 pnpm dev
 ```
 
-The React shell calls the engine at `http://127.0.0.1:8000/health` and shows the current status.
+The React shell calls the engine at `http://127.0.0.1:8000` for health checks, suggestions, and the review workflow.
 
 ### Formatting and linting
 
@@ -68,6 +68,18 @@ pnpm tauri build
 ```
 
 See the [Tauri prerequisites guide](https://tauri.app/v1/guides/getting-started/prerequisites) for platform-specific tooling.
+
+## Stage 2 workflow — review queue and export
+
+1. Drop bank CSVs and audit trail exports under `data/clients/<slug>/inputs/{bank,sage_history}`.
+2. Launch the engine and UI (commands above). In the UI, set the client slug, load CSVs, and run suggestions. The review queue displays confidence, allows manual overrides, and captures rules straight into `workspace/rules/rules.yaml`.
+3. Approved/overridden rows can be exported with the "Export approved items" button. Files are written to `data/clients/<slug>/outputs/sage_import_*.csv` using the active export profile.
+4. Use the engine API directly if needed:
+   - `POST /review/import` – seed the queue from CSV payloads.
+   - `POST /review/{slug}/items/{txn_id}/approve` – accept a suggestion.
+   - `POST /review/{slug}/items/{txn_id}/override` – apply manual coding.
+   - `POST /review/{slug}/rules` – append vendor rules.
+   - `POST /review/{slug}/export` – generate an audit trail CSV via the current profile.
 
 ## Sample data
 
