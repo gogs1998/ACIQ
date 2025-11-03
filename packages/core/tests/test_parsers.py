@@ -94,6 +94,50 @@ def test_bank_parser_handles_headerless_sage_export() -> None:
     assert "amazon" in txns[1].description_clean
 
 
+def test_bank_parser_handles_modern_statement_export() -> None:
+    rows = [
+        [
+            "20250331",
+            "",
+            "82622490051655CA",
+            "",
+            "DR",
+            "AAA",
+            "Card",
+            "-34.55",
+            "Card 53, Just Eat",
+            "",
+            "",
+            "GBP",
+        ],
+        [
+            "20250331",
+            "",
+            "82622490051655CA",
+            "",
+            "CR",
+            "AAA",
+            "Transfer",
+            "686.49",
+            "FPS, Gbp Faster Payment, MV-41114473 -",
+            "MV-41114473 -",
+            "00000000000000",
+            "GBP",
+        ],
+    ]
+    parser = BankCsvParser()
+    txns = parser.parse(_build_csv(rows))
+
+    assert len(txns) == 2
+    debit, credit = txns
+    assert debit.amount == -34.55
+    assert debit.direction == "debit"
+    assert "card just eat" in debit.description_clean
+    assert credit.amount == 686.49
+    assert credit.direction == "credit"
+    assert "faster payment" in credit.description_clean
+
+
 def test_sage_history_parser_handles_audit_trail_export_without_headers() -> None:
     rows = [
         [

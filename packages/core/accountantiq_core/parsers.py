@@ -146,6 +146,15 @@ class BankCsvParser:
     def _parse_without_headers(self, rows: list[list[str]]) -> list[BankTxn]:
         results: list[BankTxn] = []
         for idx, raw in enumerate(rows, start=1):
+            if not raw:
+                continue
+            indicator = (raw[4] if len(raw) > 4 else "").upper()
+            if len(raw) >= 9 and indicator in {"DR", "CR"}:
+                try:
+                    results.append(self._build_statement_row(raw, idx))
+                except ValueError:
+                    continue
+                continue
             if len(raw) < 11:
                 continue
             date_raw = raw[4]
@@ -179,6 +188,46 @@ class BankCsvParser:
                 )
             )
         return results
+
+    def _build_statement_row(self, row: list[str], idx: int) -> BankTxn:
+        date_raw = row[0]
+        amount_raw = (
+            row[7] if len(row) > 7 and row[7] else (row[8] if len(row) > 8 else "")
+        )
+        if not date_raw or not amount_raw:
+            raise ValueError("Missing date or amount in statement row")
+        parsed_amount = _parse_amount(amount_raw)
+        indicator = (row[4] if len(row) > 4 else "").upper()
+        if indicator == "DR" and parsed_amount > 0:
+            parsed_amount = -parsed_amount
+        if indicator == "CR" and parsed_amount < 0:
+            parsed_amount = abs(parsed_amount)
+        direction: Direction = "debit" if parsed_amount < 0 else "credit"
+        description_parts = [
+            row[8] if len(row) > 8 else "",
+            row[9] if len(row) > 9 else "",
+            row[10] if len(row) > 10 else "",
+        ]
+        description_raw = " ".join(part for part in description_parts if part).strip()
+        if not description_raw and len(row) > 6:
+            description_raw = row[6]
+        account_raw = (
+            row[2]
+            if len(row) > 2 and row[2]
+            else (row[5] if len(row) > 5 and row[5] else "default")
+        )
+        txn_id = _deterministic_id(
+            date_raw, str(parsed_amount), description_raw or "statement", str(idx)
+        )
+        return BankTxn(
+            id=txn_id,
+            date=_parse_date(date_raw),
+            amount=parsed_amount,
+            direction=direction,
+            description_raw=description_raw or "statement line",
+            description_clean=clean_description(description_raw or "statement line"),
+            account_id=account_raw,
+        )
 
     def _build_bank_txn(self, row: dict[str, str], idx: int) -> BankTxn:
         date_raw = _resolve_field(row, self.date_headers)
