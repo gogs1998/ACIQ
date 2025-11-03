@@ -9,9 +9,11 @@ import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import ClassVar, Mapping, Sequence, Union
+from typing import ClassVar, Sequence, Union
 
 from accountantiq_schemas import BankTxn, Direction, SageHistoryEntry
+
+CsvSource = Union[Path, str, io.TextIOBase]
 
 _DATE_FORMATS: Sequence[str] = (
     "%Y-%m-%d",
@@ -61,11 +63,37 @@ def _deterministic_id(*parts: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
 
 
-def _resolve_field(row: Mapping[str, str], candidates: Sequence[str]) -> str:
+def _resolve_field(row: dict[str, str], candidates: Sequence[str]) -> str:
     for candidate in candidates:
         if candidate in row and row[candidate] not in (None, ""):
             return row[candidate]
     raise KeyError(f"Could not resolve any of {candidates} in row: {row}")
+
+
+def _read_csv_rows(source: CsvSource) -> list[list[str]]:
+    """Return a trimmed list of CSV rows from any supported source."""
+    if isinstance(source, io.TextIOBase):
+        text = source.read()
+        if hasattr(source, "seek"):
+            source.seek(0)
+    else:
+        path = Path(source)
+        text = path.read_text(encoding="utf-8-sig")
+    buffer = io.StringIO(text)
+    reader = csv.reader(buffer)
+    rows: list[list[str]] = []
+    for row in reader:
+        trimmed = [cell.strip() for cell in row]
+        if any(trimmed):
+            rows.append(trimmed)
+    return rows
+
+
+def _row_looks_like_header(row: Sequence[str], expected_tokens: Sequence[str]) -> bool:
+    if not row:
+        return False
+    lowercased = {cell.lower() for cell in row if cell}
+    return any(token in lowercased for token in expected_tokens)
 
 
 @dataclass(slots=True)
@@ -85,47 +113,94 @@ class BankCsvParser:
         "account id",
         "account number",
     )
+    _header_tokens: ClassVar[tuple[str, ...]] = (
+        date_headers + amount_headers + description_headers
+    )
 
-    def parse(self, source: Union[Path, str, io.TextIOBase]) -> list[BankTxn]:
-        with _ensure_text_io(source) as handle:
-            reader = csv.DictReader(handle)
-            results: list[BankTxn] = []
-            for idx, row in enumerate(reader, start=1):
-                normalised_row = {
-                    key.strip().lower(): value.strip()
-                    for key, value in row.items()
-                    if value is not None
-                }
-                date_raw = _resolve_field(normalised_row, self.date_headers)
-                amount_raw = _resolve_field(normalised_row, self.amount_headers)
-                description_raw = _resolve_field(
-                    normalised_row, self.description_headers
-                )
-                try:
-                    account_raw = _resolve_field(normalised_row, self.account_headers)
-                except KeyError:
-                    account_raw = "default"
+    def parse(self, source: CsvSource) -> list[BankTxn]:
+        rows = _read_csv_rows(source)
+        if not rows:
+            return []
+        if _row_looks_like_header(rows[0], self._header_tokens):
+            return self._parse_with_headers(rows)
+        return self._parse_without_headers(rows)
 
-                parsed_amount = _parse_amount(amount_raw)
-                direction: Direction = "debit" if parsed_amount < 0 else "credit"
-
-                clean = clean_description(description_raw)
-                txn_id = _deterministic_id(
-                    date_raw, amount_raw, description_raw, str(idx)
-                )
-
-                results.append(
-                    BankTxn(
-                        id=txn_id,
-                        date=_parse_date(date_raw),
-                        amount=parsed_amount,
-                        direction=direction,
-                        description_raw=description_raw,
-                        description_clean=clean,
-                        account_id=account_raw or "default",
-                    )
-                )
+    def _parse_with_headers(self, rows: list[list[str]]) -> list[BankTxn]:
+        fieldnames = [cell.lower() for cell in rows[0]]
+        data_rows = rows[1:]
+        results: list[BankTxn] = []
+        for idx, raw in enumerate(data_rows, start=1):
+            if not any(raw):
+                continue
+            normalised_row = {
+                fieldnames[col_index]: raw[col_index]
+                for col_index in range(min(len(fieldnames), len(raw)))
+                if fieldnames[col_index]
+            }
+            try:
+                results.append(self._build_bank_txn(normalised_row, idx))
+            except (KeyError, ValueError):
+                continue
         return results
+
+    def _parse_without_headers(self, rows: list[list[str]]) -> list[BankTxn]:
+        results: list[BankTxn] = []
+        for idx, raw in enumerate(rows, start=1):
+            if len(raw) < 11:
+                continue
+            date_raw = raw[4]
+            amount_raw = raw[10] or raw[8]
+            if not date_raw or not amount_raw:
+                continue
+            description_tokens = [
+                raw[7],
+                raw[3] if len(raw) > 3 else "",
+                raw[2] if len(raw) > 2 else "",
+            ]
+            description_raw = " ".join(
+                token for token in description_tokens if token
+            ).strip()
+            if not description_raw:
+                continue
+            account_raw = raw[0] or (raw[1] if len(raw) > 1 else "default")
+            parsed_amount = _parse_amount(amount_raw)
+            direction: Direction = "debit" if parsed_amount < 0 else "credit"
+            results.append(
+                BankTxn(
+                    id=_deterministic_id(
+                        date_raw, amount_raw, description_raw, str(idx)
+                    ),
+                    date=_parse_date(date_raw),
+                    amount=parsed_amount,
+                    direction=direction,
+                    description_raw=description_raw,
+                    description_clean=clean_description(description_raw),
+                    account_id=account_raw or "default",
+                )
+            )
+        return results
+
+    def _build_bank_txn(self, row: dict[str, str], idx: int) -> BankTxn:
+        date_raw = _resolve_field(row, self.date_headers)
+        amount_raw = _resolve_field(row, self.amount_headers)
+        description_raw = _resolve_field(row, self.description_headers)
+        try:
+            account_raw = _resolve_field(row, self.account_headers)
+        except KeyError:
+            account_raw = "default"
+        parsed_amount = _parse_amount(amount_raw)
+        direction: Direction = "debit" if parsed_amount < 0 else "credit"
+        clean = clean_description(description_raw)
+        txn_id = _deterministic_id(date_raw, amount_raw, description_raw, str(idx))
+        return BankTxn(
+            id=txn_id,
+            date=_parse_date(date_raw),
+            amount=parsed_amount,
+            direction=direction,
+            description_raw=description_raw,
+            description_clean=clean,
+            account_id=account_raw or "default",
+        )
 
 
 @dataclass(slots=True)
@@ -138,47 +213,104 @@ class SageHistoryParser:
     nominal_headers: ClassVar[tuple[str, ...]] = ("nominal code", "account")
     tax_code_headers: ClassVar[tuple[str, ...]] = ("tax code", "tax")
     reference_headers: ClassVar[tuple[str, ...]] = ("reference", "ref")
+    _header_tokens: ClassVar[tuple[str, ...]] = (
+        "date",
+        "details",
+        "description",
+        "nominal code",
+        "tax code",
+    )
 
-    def parse(self, source: Union[Path, str, io.TextIOBase]) -> list[SageHistoryEntry]:
-        with _ensure_text_io(source) as handle:
-            reader = csv.DictReader(handle)
-            results: list[SageHistoryEntry] = []
-            for idx, row in enumerate(reader, start=1):
-                normalised_row = {
-                    key.strip().lower(): value.strip()
-                    for key, value in row.items()
-                    if value is not None
-                }
-                date_raw = _resolve_field(normalised_row, self.date_headers)
-                amount_raw = _resolve_field(normalised_row, self.net_amount_headers)
-                description_raw = _resolve_field(normalised_row, self.details_headers)
-                nominal_raw = _resolve_field(normalised_row, self.nominal_headers)
-                tax_code_raw = _resolve_field(normalised_row, self.tax_code_headers)
-                reference_raw = normalised_row.get(self.reference_headers[0], str(idx))
+    def parse(self, source: CsvSource) -> list[SageHistoryEntry]:
+        rows = _read_csv_rows(source)
+        if not rows:
+            return []
+        if _row_looks_like_header(rows[0], self._header_tokens):
+            return self._parse_with_headers(rows)
+        return self._parse_without_headers(rows)
 
-                clean = clean_description(description_raw)
-                vendor_hint = self._derive_vendor_hint(clean)
-                entry_id = _deterministic_id(
-                    date_raw,
-                    amount_raw,
-                    description_raw,
-                    nominal_raw,
-                    reference_raw,
-                )
-
-                results.append(
-                    SageHistoryEntry(
-                        id=entry_id,
-                        date=_parse_date(date_raw),
-                        amount=_parse_amount(amount_raw),
-                        nominal_code=nominal_raw,
-                        tax_code=tax_code_raw,
-                        description_raw=description_raw,
-                        description_clean=clean,
-                        vendor_hint=vendor_hint,
-                    )
-                )
+    def _parse_with_headers(self, rows: list[list[str]]) -> list[SageHistoryEntry]:
+        fieldnames = [cell.lower() for cell in rows[0]]
+        data_rows = rows[1:]
+        results: list[SageHistoryEntry] = []
+        for idx, raw in enumerate(data_rows, start=1):
+            if not any(raw):
+                continue
+            normalised_row = {
+                fieldnames[col_index]: raw[col_index]
+                for col_index in range(min(len(fieldnames), len(raw)))
+                if fieldnames[col_index]
+            }
+            try:
+                results.append(self._build_history_entry(normalised_row, idx))
+            except (KeyError, ValueError):
+                continue
         return results
+
+    def _parse_without_headers(self, rows: list[list[str]]) -> list[SageHistoryEntry]:
+        results: list[SageHistoryEntry] = []
+        for idx, raw in enumerate(rows, start=1):
+            if len(raw) < 18:
+                continue
+            date_raw = raw[3]
+            nominal_raw = raw[12] if len(raw) > 12 else ""
+            description_raw = raw[14] if len(raw) > 14 else ""
+            tax_code_raw = raw[17] if len(raw) > 17 else ""
+            if not date_raw or not nominal_raw or not description_raw:
+                continue
+            amount_candidates = [
+                raw[18] if len(raw) > 18 else "",
+                raw[15] if len(raw) > 15 else "",
+                raw[6] if len(raw) > 6 else "",
+            ]
+            amount_raw = next(
+                (candidate for candidate in amount_candidates if candidate), ""
+            )
+            if not amount_raw:
+                continue
+            parsed_amount = _parse_amount(amount_raw) * _infer_audit_sign(
+                raw[1] if len(raw) > 1 else ""
+            )
+            vendor_hint = self._derive_vendor_hint(clean_description(description_raw))
+            entry_id = _deterministic_id(
+                date_raw, nominal_raw, description_raw, str(idx)
+            )
+            results.append(
+                SageHistoryEntry(
+                    id=entry_id,
+                    date=_parse_date(date_raw),
+                    amount=parsed_amount,
+                    nominal_code=nominal_raw,
+                    tax_code=tax_code_raw or "T0",
+                    description_raw=description_raw,
+                    description_clean=clean_description(description_raw),
+                    vendor_hint=vendor_hint,
+                )
+            )
+        return results
+
+    def _build_history_entry(self, row: dict[str, str], idx: int) -> SageHistoryEntry:
+        date_raw = _resolve_field(row, self.date_headers)
+        amount_raw = _resolve_field(row, self.net_amount_headers)
+        description_raw = _resolve_field(row, self.details_headers)
+        nominal_raw = _resolve_field(row, self.nominal_headers)
+        tax_code_raw = _resolve_field(row, self.tax_code_headers)
+        reference_raw = row.get(self.reference_headers[0], str(idx))
+        clean = clean_description(description_raw)
+        vendor_hint = self._derive_vendor_hint(clean)
+        entry_id = _deterministic_id(
+            date_raw, amount_raw, description_raw, nominal_raw, reference_raw
+        )
+        return SageHistoryEntry(
+            id=entry_id,
+            date=_parse_date(date_raw),
+            amount=_parse_amount(amount_raw),
+            nominal_code=nominal_raw,
+            tax_code=tax_code_raw,
+            description_raw=description_raw,
+            description_clean=clean,
+            vendor_hint=vendor_hint,
+        )
 
     @staticmethod
     def _derive_vendor_hint(cleaned_description: str) -> str | None:
@@ -190,27 +322,11 @@ class SageHistoryParser:
         return " ".join(tokens[:3])
 
 
-class _TempFileWrapper:
-    """Context manager ensuring all sources act like TextIO."""
-
-    def __init__(self, handle: io.TextIOBase, close: bool) -> None:
-        self._handle = handle
-        self._close = close
-
-    def __enter__(self) -> io.TextIOBase:
-        return self._handle
-
-    def __exit__(self, *_args: object) -> None:
-        if self._close:
-            self._handle.close()
-
-
-def _ensure_text_io(source: Union[Path, str, io.TextIOBase]) -> _TempFileWrapper:
-    if isinstance(source, io.TextIOBase):
-        return _TempFileWrapper(source, close=False)
-    path = Path(source)
-    handle = path.open("r", encoding="utf-8")
-    return _TempFileWrapper(handle, close=True)
+def _infer_audit_sign(tx_type: str) -> float:
+    tx_type = tx_type.upper()
+    if tx_type in {"BP", "JD"}:
+        return -1.0
+    return 1.0
 
 
 __all__ = ["BankCsvParser", "SageHistoryParser", "clean_description"]
